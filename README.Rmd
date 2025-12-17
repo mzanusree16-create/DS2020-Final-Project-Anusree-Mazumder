@@ -1,0 +1,188 @@
+---
+title: "DS2020_Final_Project"
+author: "Anusree Mazumder"
+date: "2025-11-01"
+output: github_document
+---
+## Introduction
+This project investigates factors that influence used car prices using a publicly available Kaggle dataset.
+Understanding price drivers such as mileage, age, and manufacturer is valuable to both buyers and sellers,
+and provides a practical application of machine learning methods for regression problems.
+
+We explore the data, engineer meaningful features, and evaluate a Random Forest model to predict vehicle prices.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(data.table)
+library(randomForest)
+library(knitr)
+library(corrplot)
+library(janitor)
+library(forcats)
+```
+
+## Data
+The dataset consists of used car listings, including variables such as price (target),
+mileage, production year, manufacturer, fuel type, model, and transmission.
+The training set contains observed prices, while the test set does not.
+
+```{r}
+# ---------------------------
+# Load data
+# ---------------------------
+
+train <- read.csv("train.csv") %>% clean_names()
+test  <- read.csv("test.csv") %>% clean_names()
+
+# Remove duplicates
+train <- train %>% distinct()
+
+# Remove rows with missing target
+train <- train %>% filter(!is.na(price))
+```
+
+
+```{r}
+# ---------------------------
+# Numeric NA Imputation (TRAIN)
+# ---------------------------
+
+num_cols <- sapply(train, is.numeric)
+
+train[num_cols] <- train[num_cols] %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# Save train medians for test
+train_medians <- sapply(train[num_cols], median, na.rm = TRUE)
+
+# ---------------------------
+# Categorical processing
+# ---------------------------
+
+cat_cols <- c("manufacturer", "model", "fuel_type", "gear_box_type")
+
+train[cat_cols] <- lapply(train[cat_cols], factor)
+test[cat_cols]  <- lapply(test[cat_cols], factor)
+
+# Lump ONLY train
+train$model <- fct_lump(train$model, n = 50)
+train$manufacturer <- fct_lump(train$manufacturer, n = 50)
+train$gear_box_type <- fct_lump(train$gear_box_type, n = 20)
+
+# Align test levels + add "Other"
+for (col in cat_cols) {
+  test[[col]] <- factor(test[[col]], levels = levels(train[[col]]))
+  levels(test[[col]]) <- c(levels(test[[col]]), "Other")
+  test[[col]][is.na(test[[col]])] <- "Other"
+}
+
+# ---------------------------
+# Feature engineering
+# ---------------------------
+
+if (!"prod_year" %in% names(train)) {
+  stop("prod_year column not found")
+}
+
+train$vehicle_age <- 2025 - train$prod_year
+test$vehicle_age  <- 2025 - test$prod_year
+
+```
+
+## Exploratory Data Analysis
+We begin by examining the distribution of prices and their relationship with mileage.
+Several transformations and variable combinations were tested before settling on the final feature set.
+
+Higher mileage is generally associated with lower prices, although variance increases
+for luxury manufacturers, motivating the use of a non-linear model.
+
+```{r}
+# ---------------------------
+# Exploratory plots
+# ---------------------------
+
+ggplot(train, aes(price)) +
+  geom_histogram(bins = 50) +
+  theme_minimal() +
+  labs(title = "Distribution of Car Prices")
+
+ggplot(train, aes(mileage, price)) +
+  geom_point(alpha = 0.4) +
+  theme_minimal() +
+  labs(title = "Mileage vs Price")
+
+numeric_vars <- train %>% select(where(is.numeric))
+numeric_vars <- numeric_vars[, sapply(numeric_vars, function(x) length(unique(x)) > 1)]
+
+corrplot(cor(numeric_vars, use = "pairwise.complete.obs"), method = "color")
+
+# ---------------------------
+# Train / validation split
+# ---------------------------
+
+set.seed(123)
+idx <- createDataPartition(train$price, p = 0.8, list = FALSE)
+
+train_data <- train[idx, ]
+val_data   <- train[-idx, ]
+
+# ---------------------------
+# Random Forest
+# ---------------------------
+
+rf_model <- randomForest(
+  price ~ .,
+  data = train_data %>% select(-prod_year),
+  ntree = 200,
+  importance = TRUE
+)
+```
+
+## Model Validation and Skepticism
+To guard against over-fitting, we evaluate performance on a held-out validation set.
+Multiple pre-processing choices and model parameters were tested.
+While Random Forest performs well, predictions for rare models are less reliable.
+
+```{r}
+# Validation
+rf_preds <- predict(rf_model, val_data %>% select(-prod_year))
+postResample(pred = rf_preds, obs = val_data$price)
+
+varImpPlot(rf_model)
+
+# ---------------------------
+# Test preprocessing
+# ---------------------------
+
+num_cols_test <- sapply(test, is.numeric)
+
+for (col in names(train_medians)) {
+  test[[col]][is.na(test[[col]])] <- train_medians[col]
+}
+
+# ---------------------------
+# Test prediction
+# ---------------------------
+
+test$predicted_price <- predict(
+  rf_model,
+  test %>% select(-prod_year)
+)
+
+write.csv(
+  test %>% select(predicted_price),
+  "car_price_predictions.csv",
+  row.names = FALSE
+)
+```
+## Conclusions
+Vehicle age and mileage are the strongest predictors of price.
+Future work could explore gradient boosting models or external data such as accident history.
